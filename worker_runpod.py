@@ -1,4 +1,4 @@
-import os, json, requests, random, time, cv2, ffmpeg, runpod
+import os, json, requests, random, time, cv2, ffmpeg, runpod, base64
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from urllib.parse import urlsplit
 
@@ -58,6 +58,17 @@ def get_input_image_path(input_image):
         file.write(response.content)
     print(f"Image downloaded to: {file_path}")
     return file_path
+
+def video_to_base64(video_path):
+    """Convert video file to base64 string"""
+    try:
+        with open(video_path, 'rb') as video_file:
+            video_data = video_file.read()
+            base64_data = base64.b64encode(video_data).decode('utf-8')
+            return base64_data
+    except Exception as e:
+        print(f"Error converting video to base64: {e}")
+        return None
 
 def images_to_mp4(images, output_path, fps=24):
     try:
@@ -128,8 +139,24 @@ def generate(input):
         
         job_id = values.get('job_id', f'local-job-{seed}')
         
-        # Return local file path instead of upload URL
-        return {"jobId": job_id, "result": result, "status": "DONE", "message": "Video saved locally"}
+        # Convert video to base64
+        video_base64 = video_to_base64(result)
+        
+        # Return response with both file path and base64 content
+        response = {
+            "jobId": job_id, 
+            "result": result, 
+            "status": "DONE", 
+            "message": "Video generated successfully"
+        }
+        
+        if video_base64:
+            response["base64_content"] = video_base64
+            response["base64_mime_type"] = "video/mp4"
+        else:
+            response["message"] = "Video saved locally but base64 conversion failed"
+            
+        return response
     except Exception as e:
         job_id = values.get('job_id', 'unknown-job') if 'values' in locals() else 'unknown-job'
         print(f"Error in generate: {str(e)}")

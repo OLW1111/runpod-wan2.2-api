@@ -69,6 +69,16 @@ def main():
     print(f"Output: {result['result']}")
     if 'message' in result:
         print(f"Message: {result['message']}")
+    
+    # Display base64 content info if available
+    if 'base64_content' in result:
+        print(f"\n📦 Base64 Content Available!")
+        print(f"MIME Type: {result.get('base64_mime_type', 'video/mp4')}")
+        print(f"Base64 Length: {len(result['base64_content'])} characters")
+        print(f"\n💡 To save the video from base64:")
+        print(f"   echo '{result['base64_content'][:50]}...' | base64 -d > output.mp4")
+        print(f"\n📋 Full base64 content (copy this to download):")
+        print(f"{result['base64_content']}")
 
 if __name__ == "__main__":
     main()
