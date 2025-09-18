@@ -1,37 +1,50 @@
-FROM ubuntu:22.04
+# Use NVIDIA CUDA base image
+FROM nvidia/cuda:11.8-devel-ubuntu22.04
 
-WORKDIR /content
-
+# Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=True
-ENV PYTHONDONTWRITEBYTECODE=True
-ENV PATH="/home/camenduru/.local/bin:/usr/local/cuda/bin:${PATH}"
+ENV PYTHONUNBUFFERED=1
 
-RUN apt update -y && apt install -y software-properties-common build-essential \
-    libgl1 libglib2.0-0 zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev && \
-    add-apt-repository -y ppa:git-core/ppa && apt update -y && \
-    apt install -y python-is-python3 python3-pip sudo nano aria2 curl wget git git-lfs unzip unrar ffmpeg && \
-    aria2c --console-log-level=error -c -x 16 -s 16 -k 1M https://developer.download.nvidia.com/compute/cuda/12.9.1/local_installers/cuda_12.9.1_575.57.08_linux.run -d /content -o cuda_12.9.1_575.57.08_linux.run && sh cuda_12.9.1_575.57.08_linux.run --silent --toolkit && \
-    echo "/usr/local/cuda/lib64" >> /etc/ld.so.conf && ldconfig && \
-    git clone https://github.com/aristocratos/btop /content/btop && cd /content/btop && make && make install && \
-    adduser --disabled-password --gecos '' camenduru && \
-    adduser camenduru sudo && \
-    echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers && \
-    chown -R camenduru:camenduru /content && \
-    chmod -R 777 /content && \
-    chown -R camenduru:camenduru /home && \
-    chmod -R 777 /home
-    
-USER camenduru
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    git \
+    wget \
+    curl \
+    ffmpeg \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu128 && \
-    pip install xformers --extra-index-url https://download.pytorch.org/whl/cu128 && \
-    git clone --depth 1 --branch master https://github.com/comfyanonymous/ComfyUI /content/ComfyUI && cd /content/ComfyUI && pip install -r requirements.txt && \
-    pip install opencv-python imageio imageio-ffmpeg ffmpeg-python moviepy timm scikit-image matplotlib diffusers accelerate peft runpod && \
-    aria2c --console-log-level=error -c -x 16 -s 16 -k 1M https://huggingface.co/Phr00t/WAN2.2-14B-Rapid-AllInOne/resolve/main/wan2.2-i2v-rapid-aio.safetensors -d /content/ComfyUI/models/checkpoints -o wan2.2-i2v-rapid-aio.safetensors && \
-    aria2c --console-log-level=error -c -x 16 -s 16 -k 1M https://huggingface.co/lllyasviel/misc/resolve/main/clip_vision_vit_h.safetensors -d /content/ComfyUI/models/clip_vision -o clip_vision_vit_h.safetensors
+# Set working directory
+WORKDIR /workspace
 
-COPY ./worker_runpod.py /content/ComfyUI/worker_runpod.py
-COPY ./generate_video.py /content/ComfyUI/generate_video.py
-WORKDIR /content/ComfyUI
-CMD ["python", "worker_runpod.py"]
+# Clone ComfyUI and WAN2.2 repository
+RUN git clone https://github.com/camenduru/wan2.2-i2v-rapid-tost.git .
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 \
+    runpod \
+    requests \
+    Pillow \
+    opencv-python \
+    accelerate \
+    transformers \
+    diffusers \
+    xformers
+
+# Copy custom worker
+COPY worker_batch.py /workspace/worker_batch.py
+COPY generate_video.py /workspace/generate_video.py
+
+# Make output directory
+RUN mkdir -p /workspace/output
+
+# Set the command to run the worker
+CMD ["python3", "worker_batch.py"]
