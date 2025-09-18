@@ -4,7 +4,6 @@ Generate video using command line arguments or environment variables.
 This script reads parameters from CLI args (priority) or environment variables and calls the worker directly.
 """
 import os
-import json
 import argparse
 from worker_runpod import generate
 
@@ -27,13 +26,11 @@ def main():
     parser.add_argument("--scheduler", help="Scheduler name")
     parser.add_argument("--batch-size", type=int, help="Batch size")
     parser.add_argument("--job-id", help="Job ID for tracking")
-    
     args = parser.parse_args()
-    
-    # Read parameters from CLI args (priority) or environment variables (fallback)
+
     input_data = {
         "input": {
-            "input_image": args.input_image or os.getenv("INPUT_IMAGE", "https://s3.tost.ai/input/a2784ea5-0d9b-41e0-8eb2-69be58261074.png"),
+            "input_image": args.input_image or os.getenv("INPUT_IMAGE", "https://picsum.photos/seed/wan/1024/576"),
             "positive_prompt": args.positive_prompt or os.getenv("POSITIVE_PROMPT", "A beautiful scene with dynamic movement"),
             "negative_prompt": args.negative_prompt or os.getenv("NEGATIVE_PROMPT", "static, blurry, low quality"),
             "crop": args.crop or os.getenv("CROP", "center"),
@@ -51,34 +48,28 @@ def main():
             "job_id": args.job_id or os.getenv("JOB_ID", f"cli-job-{args.seed or os.getenv('SEED', '42')}")
         }
     }
-    
+
     print("🎬 Starting WAN2.2 I2V Generation")
     print("=" * 50)
     print(f"Input Image: {input_data['input']['input_image']}")
     print(f"Prompt: {input_data['input']['positive_prompt']}")
-    print(f"Resolution: {input_data['input']['width']}x{input_data['input']['height']}")  
+    print(f"Resolution: {input_data['input']['width']}x{input_data['input']['height']}")
     print(f"Steps: {input_data['input']['steps']}")
     print(f"Seed: {input_data['input']['seed']}")
     print("=" * 50)
-    
-    # Generate video
+
     result = generate(input_data)
-    
+
     print("\n🎉 Generation Complete!")
     print(f"Status: {result['status']}")
     print(f"Output: {result['result']}")
     if 'message' in result:
         print(f"Message: {result['message']}")
-    
-    # Display base64 content info if available
+
     if 'base64_content' in result:
         print(f"\n📦 Base64 Content Available!")
         print(f"MIME Type: {result.get('base64_mime_type', 'video/mp4')}")
         print(f"Base64 Length: {len(result['base64_content'])} characters")
-        print(f"\n💡 To save the video from base64:")
-        print(f"   echo '{result['base64_content'][:50]}...' | base64 -d > output.mp4")
-        print(f"\n📋 Full base64 content (copy this to download):")
-        print(f"{result['base64_content']}")
 
 if __name__ == "__main__":
     main()

@@ -1,31 +1,30 @@
-import os
-import json
-import requests
-import random
-import time
-import base64
+import os, sys, json, requests, random, time, base64, subprocess
 from urllib.parse import urlsplit
 
-import cv2               # needs opencv-python-headless
-import ffmpeg            # python package "ffmpeg-python"
 import torch
 import numpy as np
+import cv2  # opencv-python-headless
 
-# ComfyUI nodes
+# --- Make ComfyUI importable BEFORE using `nodes`
+COMFY_PATH = os.getenv("COMFY_PATH", "/content/ComfyUI")
+sys.path.insert(0, COMFY_PATH)
+sys.path.insert(0, os.path.join(COMFY_PATH, "custom_nodes"))
+if not os.path.exists(os.path.join(COMFY_PATH, "nodes.py")):
+    raise FileNotFoundError(f"ComfyUI not found at {COMFY_PATH}. Clone it or set COMFY_PATH.")
+
 from nodes import NODE_CLASS_MAPPINGS
 from comfy_extras import nodes_wan, nodes_model_advanced
 
-# ---------------------------
-# Config / model paths
-# ---------------------------
-CHECKPOINT_PATH = os.getenv(
-    "WAN_CHECKPOINT_PATH",
-    "wan2.2-i2v-rapid-aio.safetensors"  # override with absolute path if you place it under /content/ComfyUI/models/checkpoints/
-)
-CLIP_VISION_PATH = os.getenv(
-    "WAN_CLIP_VISION_PATH",
-    "clip_vision_vit_h.safetensors"
-)
+# Configurable model paths (env or default filenames searched in common dirs)
+CHECKPOINT_PATH = os.getenv("WAN_CHECKPOINT_PATH", "wan2.2-i2v-rapid-aio.safetensors")
+CLIP_VISION_PATH = os.getenv("WAN_CLIP_VISION_PATH", "clip_vision_vit_h.safetensors")
+
+# Torch speed knobs (safe defaults)
+torch.backends.cudnn.benchmark = True
+try:
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
 
 # Node instances
 CheckpointLoaderSimple = NODE_CLASS_MAPPINGS["CheckpointLoaderSimple"]()
@@ -41,33 +40,39 @@ VAEDecode = NODE_CLASS_MAPPINGS["VAEDecode"]()
 # Globals for lazy load
 _unet = _clip = _vae = _clip_vision = None
 
+def _find_existing(paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
 def _ensure_models_loaded():
     """Load heavy models once per process."""
     global _unet, _clip, _vae, _clip_vision
     if _unet is not None:
         return
-    # Try a couple of common locations if relative path not found
-    candidate_ckpts = [
+
+    ckpt = _find_existing([
         CHECKPOINT_PATH,
-        f"/content/ComfyUI/models/checkpoints/{os.path.basename(CHECKPOINT_PATH)}"
-    ]
-    ckpt = next((p for p in candidate_ckpts if os.path.exists(p)), None)
+        f"/content/ComfyUI/models/checkpoints/{os.path.basename(CHECKPOINT_PATH)}",
+    ])
     if ckpt is None:
         raise FileNotFoundError(
-            f"WAN checkpoint not found. Tried: {candidate_ckpts}. "
-            "Mount or download the weights and set WAN_CHECKPOINT_PATH."
+            "WAN checkpoint not found. Put it at "
+            "/content/ComfyUI/models/checkpoints/wan2.2-i2v-rapid-aio.safetensors "
+            "or set WAN_CHECKPOINT_PATH to an absolute file path."
         )
 
-    candidate_clip = [
+    clip_path = _find_existing([
         CLIP_VISION_PATH,
         f"/content/ComfyUI/models/clip_vision/{os.path.basename(CLIP_VISION_PATH)}",
         f"/content/ComfyUI/models/clip/{os.path.basename(CLIP_VISION_PATH)}",
-    ]
-    clip_path = next((p for p in candidate_clip if os.path.exists(p)), None)
+    ])
     if clip_path is None:
         raise FileNotFoundError(
-            f"CLIP vision weights not found. Tried: {candidate_clip}. "
-            "Mount or download and set WAN_CLIP_VISION_PATH."
+            "CLIP vision weights not found. Put them at "
+            "/content/ComfyUI/models/clip_vision/clip_vision_vit_h.safetensors "
+            "or set WAN_CLIP_VISION_PATH."
         )
 
     with torch.inference_mode():
@@ -77,6 +82,7 @@ def _ensure_models_loaded():
 def get_input_image_path(input_image: str) -> str:
     """Return local path for URL or local filename."""
     if not input_image.startswith(('http://', 'https://')):
+        # local file
         local_path = f"/content/ComfyUI/input/{input_image}"
         if os.path.exists(local_path):
             return local_path
@@ -84,6 +90,7 @@ def get_input_image_path(input_image: str) -> str:
             return input_image
         raise FileNotFoundError(f"Local image not found: {input_image}")
 
+    # download
     os.makedirs("/content/ComfyUI/input", exist_ok=True)
     suffix = os.path.splitext(urlsplit(input_image).path)[1] or ".jpg"
     file_path = os.path.join("/content/ComfyUI/input", f"downloaded_image{suffix}")
@@ -101,35 +108,55 @@ def video_to_base64(video_path: str) -> str | None:
         print(f"[warn] base64 convert failed: {e}")
         return None
 
-def images_to_mp4(images, output_path: str, fps: int = 24):
-    """Write tensor images -> mp4 via ffmpeg-python."""
-    frames = []
-    for image in images:
-        arr = 255.0 * image.cpu().numpy()
-        img = np.clip(arr, 0, 255).astype(np.uint8)
-        if img.shape[0] in [1, 3, 4]:
-            img = np.transpose(img, (1, 2, 0))
-        if img.shape[-1] == 4:
-            img = img[:, :, :3]
-        frames.append(img)
+def images_to_mp4(decoded_images, output_path: str, fps: int = 24):
+    """
+    Fast path: stream raw RGB frames to system ffmpeg (NVENC if available).
+    Avoids writing hundreds of PNGs and avoids ffmpeg-python module.
+    """
+    frames = decoded_images.detach().cpu().numpy()  # [N,C,H,W] in 0..1 or 0..255
+    if frames.shape[1] in (1, 3, 4):
+        frames = np.transpose(frames, (0, 2, 3, 1))  # [N,H,W,C]
+    if frames.shape[-1] == 4:
+        frames = frames[..., :3]
+    if frames.dtype != np.uint8:
+        frames = np.clip(frames * 255.0, 0, 255).astype(np.uint8)
 
-    temp_names = [f"temp_{i:04d}.png" for i in range(len(frames))]
-    for name, frame in zip(temp_names, frames):
-        if not cv2.imwrite(name, frame[:, :, ::-1]):  # BGR
-            raise RuntimeError(f"Failed to write {name}")
+    n, h, w, c = frames.shape
+    assert c == 3, "Expecting RGB frames"
 
-    if not os.path.exists(temp_names[0]):
-        raise RuntimeError("No temp PNGs were created")
-
-    stream = ffmpeg.input("temp_%04d.png", framerate=fps)
-    stream = ffmpeg.output(stream, output_path, vcodec="libx264", pix_fmt="yuv420p")
-    ffmpeg.run(stream, overwrite_output=True)
-
-    for name in temp_names:
-        try:
-            os.remove(name)
-        except Exception:
-            pass
+    # Prefer NVENC; fall back to libx264 if NVENC not present
+    codec = "h264_nvenc"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-s", f"{w}x{h}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-c:v", codec,
+        "-preset", "p5",
+        "-tune", "ll",
+        "-rc", "vbr", "-b:v", "5M", "-maxrate", "10M",
+        "-pix_fmt", "yuv420p",
+        output_path,
+    ]
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    except FileNotFoundError:
+        # ffmpeg missing (shouldn't happen: installed via apt)
+        raise RuntimeError("ffmpeg binary not found in container")
+    try:
+        proc.stdin.write(frames.tobytes(order="C"))
+    finally:
+        proc.stdin.close()
+        proc.wait()
+        if proc.returncode != 0:
+            # Retry with CPU x264 once
+            cmd_cpu = cmd[:]
+            i_codec = cmd_cpu.index("-c:v")
+            cmd_cpu[i_codec + 1] = "libx264"
+            subprocess.run(cmd_cpu, input=frames.tobytes(order="C"), check=True)
 
 @torch.inference_mode()
 def generate(event_input: dict) -> dict:
@@ -197,7 +224,4 @@ def generate(event_input: dict) -> dict:
 
     return resp
 
-# IMPORTANT: do NOT start a server here. worker_batch will do it.
-# if __name__ == "__main__":
-#     import runpod
-#     runpod.serverless.start({"handler": generate})
+# DO NOT start server here. `worker_batch.py` is the only entrypoint.
