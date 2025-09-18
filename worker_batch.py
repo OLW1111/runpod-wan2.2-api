@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
-# ---------- BOOTSTRAP DEPS FIRST (before anything else) ----------
-import sys, subprocess
+import os, sys, subprocess
 
-def _ensure(pkg, import_name=None):
-    import_name = import_name or pkg
+# ---------- RUNTIME BOOTSTRAP (no rebuild needed) ----------
+COMFY_PATH = os.getenv("COMFY_PATH", "/content/ComfyUI")
+if not os.path.exists(os.path.join(COMFY_PATH, "nodes.py")):
+    print(f"[bootstrap] ComfyUI not found at {COMFY_PATH}, cloning...")
+    subprocess.check_call(["git", "clone", "https://github.com/comfyanonymous/ComfyUI.git", COMFY_PATH])
+    # requirements are mostly torch/cuda which you already have; ignore failures
     try:
-        __import__(import_name)
-        print(f"[deps] OK: {pkg} (import {import_name})")
-    except Exception:
-        print(f"[deps] MISSING: {pkg} -> installing...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", pkg])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", f"{COMFY_PATH}/requirements.txt"])
+    except Exception as e:
+        print(f"[bootstrap] ComfyUI requirements install non-fatal error: {e}")
 
-# Required by worker_runpod.py at import-time
-_ensure("ffmpeg-python", "ffmpeg")
-_ensure("opencv-python-headless", "cv2")
-_ensure("moviepy")
-_ensure("numpy")
-# -----------------------------------------------------------------
+# Make ComfyUI importable for downstream modules
+sys.path.insert(0, COMFY_PATH)
+sys.path.insert(0, os.path.join(COMFY_PATH, "custom_nodes"))
+# -----------------------------------------------------------
 
-import os
 import json
 import uuid
 from typing import Dict, Any, Tuple, List
@@ -26,16 +24,12 @@ from typing import Dict, Any, Tuple, List
 import requests
 import runpod
 
-# Safe now: worker_runpod imports ffmpeg/cv2/etc during import
+# Import AFTER bootstrap so worker_runpod can do: from nodes import ...
 from worker_runpod import generate as generate_one
 
 
 def resolution_to_dimensions(res: str) -> Tuple[int, int]:
-    return {
-        "480p": (720, 480),
-        "720p": (1280, 720),
-        "1080p": (1920, 1080),
-    }.get(res, (1280, 720))
+    return {"480p": (720, 480), "720p": (1280, 720), "1080p": (1920, 1080)}.get(res, (1280, 720))
 
 
 def generate_single_video(job: Dict[str, Any], job_id: str) -> Dict[str, Any]:
@@ -77,34 +71,20 @@ def generate_single_video(job: Dict[str, Any], job_id: str) -> Dict[str, Any]:
                 },
             }
         else:
-            return {
-                "status": "error",
-                "job_id": job_id,
-                "error": f"Generation failed: {result.get('result', 'Unknown error')}",
-            }
+            return {"status": "error", "job_id": job_id, "error": f"Generation failed: {result.get('result', 'Unknown error')}"}
     except Exception as e:
         return {"status": "error", "job_id": job_id, "error": str(e)}
 
 
 def send_webhook(webhook_url: str, data: Dict[str, Any]) -> None:
     try:
-        requests.post(webhook_url, json=data, timeout=30)
+        if webhook_url:
+            requests.post(webhook_url, json=data, timeout=30)
     except Exception as e:
-        print(f"[warn] webhook failed: {str(e)}")
+        print(f"[warn] webhook failed: {e}")
 
 
 def handler(job: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    RunPod serverless entry.
-    Expects payload:
-    {
-      "input": {
-        "jobs": [ {image_url, res, fps, frames, steps, cfg, prompt, seed}, ... ],
-        "concat": false,
-        "webhook": "https://example.com/hook"  # optional
-      }
-    }
-    """
     try:
         job_input = job.get("input", {}) or {}
         jobs: List[Dict[str, Any]] = job_input.get("jobs", [])
