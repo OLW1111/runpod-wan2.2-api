@@ -1,3 +1,23 @@
+#!/usr/bin/env python3
+# ---------- BOOTSTRAP DEPS FIRST (before anything else) ----------
+import sys, subprocess
+
+def _ensure(pkg, import_name=None):
+    import_name = import_name or pkg
+    try:
+        __import__(import_name)
+        print(f"[deps] OK: {pkg} (import {import_name})")
+    except Exception:
+        print(f"[deps] MISSING: {pkg} -> installing...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", pkg])
+
+# Required by worker_runpod.py at import-time
+_ensure("ffmpeg-python", "ffmpeg")
+_ensure("opencv-python-headless", "cv2")
+_ensure("moviepy")
+_ensure("numpy")
+# -----------------------------------------------------------------
+
 import os
 import json
 import uuid
@@ -6,12 +26,11 @@ from typing import Dict, Any, Tuple, List
 import requests
 import runpod
 
-# Import the original worker's generate function (no server start inside)
+# Safe now: worker_runpod imports ffmpeg/cv2/etc during import
 from worker_runpod import generate as generate_one
 
 
 def resolution_to_dimensions(res: str) -> Tuple[int, int]:
-    """Map '720p' -> (1280, 720), etc."""
     return {
         "480p": (720, 480),
         "720p": (1280, 720),
@@ -20,7 +39,6 @@ def resolution_to_dimensions(res: str) -> Tuple[int, int]:
 
 
 def generate_single_video(job: Dict[str, Any], job_id: str) -> Dict[str, Any]:
-    """Wrap one job to the underlying generate() signature."""
     try:
         width, height = resolution_to_dimensions(job.get("res", "720p"))
         input_payload = {
@@ -72,25 +90,24 @@ def send_webhook(webhook_url: str, data: Dict[str, Any]) -> None:
     try:
         requests.post(webhook_url, json=data, timeout=30)
     except Exception as e:
-        print(f"[warn] webhook failed: {e}")
+        print(f"[warn] webhook failed: {str(e)}")
 
 
 def handler(job: Dict[str, Any]) -> Dict[str, Any]:
     """
     RunPod serverless entry.
-    Expects payload like:
+    Expects payload:
     {
       "input": {
         "jobs": [ {image_url, res, fps, frames, steps, cfg, prompt, seed}, ... ],
-        "concat": false
-      },
-      "webhook": "https://example.com/hook"   # (top-level or inside input)
+        "concat": false,
+        "webhook": "https://example.com/hook"  # optional
+      }
     }
     """
     try:
         job_input = job.get("input", {}) or {}
         jobs: List[Dict[str, Any]] = job_input.get("jobs", [])
-        concat_enabled = bool(job_input.get("concat", False))
         webhook_url = job_input.get("webhook") or job.get("webhook")
 
         if not jobs:
@@ -105,8 +122,6 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             results.append(res)
             if res.get("status") == "success" and res.get("video_path"):
                 video_paths.append(res["video_path"])
-
-        # (Optional) concat logic can be added here if you decide to implement it.
 
         response = {
             "status": "completed",
@@ -125,5 +140,4 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    # Only this file starts the RunPod server
     runpod.serverless.start({"handler": handler})
