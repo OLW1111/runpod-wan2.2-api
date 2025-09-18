@@ -1,5 +1,5 @@
-# Use NVIDIA CUDA base image
-FROM nvidia/cuda:11.8-devel-ubuntu22.04
+# Use correct NVIDIA CUDA base image
+FROM nvidia/cuda:11.8-cudnn8-devel-ubuntu22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
