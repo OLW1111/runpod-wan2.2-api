@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /workspace
 
-# Clone ComfyUI and WAN2.2 repository
+# Clone WAN2.2 models during build
 RUN git clone https://github.com/camenduru/wan2.2-i2v-rapid-tost.git .
 
 # Install Python dependencies
@@ -41,10 +41,9 @@ RUN pip3 install --no-cache-dir \
 
 # Copy custom worker
 COPY worker_batch.py /workspace/worker_batch.py
-COPY generate_video.py /workspace/generate_video.py
 
 # Make output directory
 RUN mkdir -p /workspace/output
 
-# Set the command to run the worker
+# Set the command
 CMD ["python3", "worker_batch.py"]
